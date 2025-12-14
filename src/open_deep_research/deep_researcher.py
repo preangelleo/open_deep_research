@@ -814,7 +814,9 @@ async def notifier_node(state: AgentState, config: RunnableConfig):
         else:
             final_report = ""
     # Ensure it's a string (it might be an AIMessage object if raw)
-    if hasattr(final_report, "content"):
+    if isinstance(final_report, dict) and "text" in final_report:
+        final_report = str(final_report["text"])
+    elif hasattr(final_report, "content"):
         final_report = str(final_report.content)
     else:
         final_report = str(final_report)

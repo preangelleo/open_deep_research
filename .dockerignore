@@ -41,10 +41,9 @@ trigger_run.py
 prompt.md
 deploy-to-production.sh
 docker-compose.yml
-tests/
+
 Dockerfile
-src/open_deep_research/token_utils.py
-src/open_deep_research/state.py
+
 
 # IDEs
 .idea
