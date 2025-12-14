@@ -81,14 +81,30 @@ async def tavily_search(
     # Character limit to stay within model token limits (configurable)
     max_char_to_include = configurable.max_content_length
     
-    # Initialize summarization model with retry logic
+    # Initialize summarization model with retry logic and fallback
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
+    primary_model = init_chat_model(
         model=configurable.summarization_model,
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
         tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
+    )
+    
+    # Initialize safety net model (gemini-2.5-flash-lite)
+    safety_net_api_key = get_api_key_for_model(configurable.safety_net_model, config)
+    safety_net_model = init_chat_model(
+        model=configurable.safety_net_model,
+        max_tokens=configurable.summarization_model_max_tokens,
+        api_key=safety_net_api_key,
+        tags=["langsmith:nostream"]
+    )
+    
+    # Create fallback chain with structured output
+    # Note: We apply with_structured_output to each model individually before combining
+    primary_structured = primary_model.with_structured_output(Summary)
+    safety_net_structured = safety_net_model.with_structured_output(Summary)
+    
+    summarization_model = primary_structured.with_fallbacks([safety_net_structured]).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
     
@@ -682,7 +698,7 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
             provider = 'openai'
         elif model_str.startswith('anthropic:'):
             provider = 'anthropic'
-        elif model_str.startswith('gemini:') or model_str.startswith('google:'):
+        elif model_str.startswith('gemini:') or model_str.startswith('google:') or model_str.startswith('google_genai:'):
             provider = 'gemini'
     
     # Step 2: Check provider-specific token limit patterns
@@ -802,8 +818,9 @@ MODEL_TOKEN_LIMITS = {
     "anthropic:claude-3-7-sonnet": 200000,
     "anthropic:claude-3-5-sonnet": 200000,
     "anthropic:claude-3-5-haiku": 200000,
-    "google:gemini-1.5-pro": 2097152,
-    "google:gemini-1.5-flash": 1048576,
+    "google_genai:gemini-1.5-pro": 2097152,
+    "google_genai:gemini-1.5-flash": 1048576,
+    "google_genai:gemini-2.5-flash": 1048576,
     "google:gemini-pro": 32768,
     "cohere:command-r-plus": 128000,
     "cohere:command-r": 128000,

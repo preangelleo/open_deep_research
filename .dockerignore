@@ -1,0 +1,57 @@
+
+# Version Control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+pip-log.txt
+pip-delete-this-directory
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache
+
+# Environment Variables & Secrets
+.env
+.env.*
+credentials/
+*.pem
+*.key
+mcp_servers.json
+webhook-callback-payload-schema.json
+debug_models.py
+
+# Documentation containing sensitive info
+HOW_TO_USE.md
+PRIVATE/
+docs/private/
+trigger_run.py
+prompt.md
+deploy-to-production.sh
+docker-compose.yml
+tests/
+Dockerfile
+src/open_deep_research/token_utils.py
+src/open_deep_research/state.py
+
+# IDEs
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

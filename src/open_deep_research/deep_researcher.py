@@ -1,6 +1,8 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import os
+import aiohttp
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -50,7 +52,11 @@ from open_deep_research.utils import (
     openai_websearch_called,
     remove_up_to_last_ai_message,
     think_tool,
+    get_model_token_limit,
+    is_token_limit_exceeded,
+    remove_up_to_last_ai_message,
 )
+from open_deep_research.token_utils import get_token_usage
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
@@ -85,12 +91,21 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
         "tags": ["langsmith:nostream"]
     }
     
-    # Configure model with structured output and retry logic
+    # Configure model with structured output and fallback logic
+    safety_net_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    primary_model = configurable_model.with_config(model_config).with_structured_output(ClarifyWithUser, include_raw=True)
+    safety_net_model = configurable_model.with_config(safety_net_config).with_structured_output(ClarifyWithUser, include_raw=True)
+
     clarification_model = (
-        configurable_model
-        .with_structured_output(ClarifyWithUser)
+        primary_model
+        .with_fallbacks([safety_net_model])
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(model_config)
     )
     
     # Step 3: Analyze whether clarification is needed
@@ -100,18 +115,27 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     )
     response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
     
+    parsed_response = response["parsed"]
+    raw_response = response["raw"]
+    
     # Step 4: Route based on clarification analysis
-    if response.need_clarification:
+    if parsed_response.need_clarification:
         # End with clarifying question for user
         return Command(
             goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
+            update={
+                "messages": [AIMessage(content=parsed_response.question)],
+                **get_token_usage(raw_response)  # Track tokens
+            }
         )
     else:
         # Proceed to research with verification message
         return Command(
             goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
+            update={
+                "messages": [AIMessage(content=parsed_response.verification)],
+                **get_token_usage(raw_response)  # Track tokens
+            }
         )
 
 
@@ -138,12 +162,21 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
         "tags": ["langsmith:nostream"]
     }
     
-    # Configure model for structured research question generation
+    # Configure model for structured research question generation with fallback
+    safety_net_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    primary_model = configurable_model.with_config(research_model_config).with_structured_output(ResearchQuestion, include_raw=True)
+    safety_net_model = configurable_model.with_config(safety_net_config).with_structured_output(ResearchQuestion, include_raw=True)
+
     research_model = (
-        configurable_model
-        .with_structured_output(ResearchQuestion)
+        primary_model
+        .with_fallbacks([safety_net_model])
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(research_model_config)
     )
     
     # Step 2: Generate structured research brief from user messages
@@ -152,6 +185,9 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
         date=get_today_str()
     )
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    
+    parsed_response = response["parsed"]
+    raw_response = response["raw"]
     
     # Step 3: Initialize supervisor with research brief and instructions
     supervisor_system_prompt = lead_researcher_prompt.format(
@@ -163,14 +199,15 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     return Command(
         goto="research_supervisor", 
         update={
-            "research_brief": response.research_brief,
+            "research_brief": parsed_response.research_brief,
             "supervisor_messages": {
                 "type": "override",
                 "value": [
                     SystemMessage(content=supervisor_system_prompt),
-                    HumanMessage(content=response.research_brief)
+                    HumanMessage(content=parsed_response.research_brief)
                 ]
-            }
+            },
+            **get_token_usage(raw_response),  # Track tokens using raw response
         }
     )
 
@@ -201,12 +238,21 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     # Available tools: research delegation, completion signaling, and strategic thinking
     lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
     
-    # Configure model with tools, retry logic, and model settings
+    # Configure model with tools, retry logic, fallback and model settings
+    safety_net_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    primary_bound = configurable_model.with_config(research_model_config).bind_tools(lead_researcher_tools)
+    safety_net_bound = configurable_model.with_config(safety_net_config).bind_tools(lead_researcher_tools)
+
     research_model = (
-        configurable_model
-        .bind_tools(lead_researcher_tools)
+        primary_bound
+        .with_fallbacks([safety_net_bound])
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(research_model_config)
     )
     
     # Step 2: Generate supervisor response based on current context
@@ -218,7 +264,8 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         goto="supervisor_tools",
         update={
             "supervisor_messages": [response],
-            "research_iterations": state.get("research_iterations", 0) + 1
+            "research_iterations": state.get("research_iterations", 0) + 1,
+            **get_token_usage(response),  # Track tokens
         }
     )
 
@@ -326,6 +373,13 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 for observation in tool_results
             ])
             
+            # Aggregate token usage from researcher sub-tasks
+            subtask_input_tokens = sum(obs.get("total_input_tokens", 0) for obs in tool_results)
+            subtask_output_tokens = sum(obs.get("total_output_tokens", 0) for obs in tool_results)
+            
+            update_payload["total_input_tokens"] = subtask_input_tokens
+            update_payload["total_output_tokens"] = subtask_output_tokens
+            
             if raw_notes_concat:
                 update_payload["raw_notes"] = [raw_notes_concat]
                 
@@ -402,12 +456,21 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         date=get_today_str()
     )
     
-    # Configure model with tools, retry logic, and settings
+    # Configure model with tools, retry logic, fallback and settings
+    safety_net_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    primary_bound = configurable_model.with_config(research_model_config).bind_tools(tools)
+    safety_net_bound = configurable_model.with_config(safety_net_config).bind_tools(tools)
+
     research_model = (
-        configurable_model
-        .bind_tools(tools)
+        primary_bound
+        .with_fallbacks([safety_net_bound])
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(research_model_config)
     )
     
     # Step 3: Generate researcher response with system context
@@ -419,7 +482,8 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         goto="researcher_tools",
         update={
             "researcher_messages": [response],
-            "tool_call_iterations": state.get("tool_call_iterations", 0) + 1
+            "tool_call_iterations": state.get("tool_call_iterations", 0) + 1,
+            **get_token_usage(response),  # Track tokens
         }
     )
 
@@ -524,12 +588,24 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     """
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
-    synthesizer_model = configurable_model.with_config({
+    primary_config = {
         "model": configurable.compression_model,
         "max_tokens": configurable.compression_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.compression_model, config),
         "tags": ["langsmith:nostream"]
-    })
+    }
+    
+    safety_net_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.compression_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+    primary = configurable_model.with_config(primary_config)
+    safety_net = configurable_model.with_config(safety_net_config)
+
+    synthesizer_model = primary.with_fallbacks([safety_net])
     
     # Step 2: Prepare messages for compression
     researcher_messages = state.get("researcher_messages", [])
@@ -559,7 +635,8 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             # Return successful compression result
             return {
                 "compressed_research": str(response.content),
-                "raw_notes": [raw_notes_content]
+                "raw_notes": [raw_notes_content],
+                **get_token_usage(response),  # Track tokens
             }
             
         except Exception as e:
@@ -624,12 +701,37 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
-    writer_model_config = {
+    # Configure the 3-tier model priority queue
+    # Priority 1: Default Writer (gemini-3-pro)
+    p1_config = {
         "model": configurable.final_report_model,
         "max_tokens": configurable.final_report_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
         "tags": ["langsmith:nostream"]
     }
+    
+    # Priority 2: Fallback Writer (gemini-2.5-pro)
+    p2_config = {
+        "model": configurable.writer_fallback_model,
+        "max_tokens": configurable.final_report_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.writer_fallback_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    # Priority 3: Safety Net (gemini-2.5-flash-lite)
+    p3_config = {
+        "model": configurable.safety_net_model,
+        "max_tokens": configurable.final_report_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.safety_net_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    p1_model = configurable_model.with_config(p1_config)
+    p2_model = configurable_model.with_config(p2_config)
+    p3_model = configurable_model.with_config(p3_config)
+    
+    # Writer Fallback Chain: P1 -> P2 -> P3
+    writer_model = p1_model.with_fallbacks([p2_model, p3_model])
     
     # Step 3: Attempt report generation with token limit retry logic
     max_retries = 3
@@ -647,7 +749,7 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             )
             
             # Generate the final report
-            final_report = await configurable_model.with_config(writer_model_config).ainvoke([
+            final_report = await writer_model.ainvoke([
                 HumanMessage(content=final_report_prompt)
             ])
             
@@ -655,7 +757,8 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             return {
                 "final_report": final_report.content, 
                 "messages": [final_report],
-                **cleared_state
+                **cleared_state,
+                **get_token_usage(final_report),  # Track tokens
             }
             
         except Exception as e:
@@ -696,6 +799,198 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         **cleared_state
     }
 
+async def notifier_node(state: AgentState, config: RunnableConfig):
+    """Notifier node that sends the final report via Webhook (Fire-and-Forget).
+    
+    This node is purely deterministic code (no LLM). It constructs a detailed
+    JSON payload following the enhanced schema and POSTs it to the configured WEBHOOK_URL.
+    """
+    final_report = state.get("final_report", "")
+    # Robust handling: final_report might be a list (from reducers) or a string
+    if isinstance(final_report, list):
+        # Assuming the last item is the most recent report if it's a list
+        if final_report:
+            final_report = final_report[-1]
+        else:
+            final_report = ""
+    # Ensure it's a string (it might be an AIMessage object if raw)
+    if hasattr(final_report, "content"):
+        final_report = str(final_report.content)
+    else:
+        final_report = str(final_report)
+        
+    # Restore missing metadata extraction
+    run_id = config.get("configurable", {}).get("run_id") or config.get("run_id")
+    thread_id = config.get("configurable", {}).get("thread_id") or config.get("thread_id")
+    messages = state.get("messages", [])
+    
+    original_prompt = "Unknown prompt"
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            original_prompt = str(msg.content)
+            break
+            
+    # Title extraction
+    title = "Research Report"
+    if final_report:
+        try:
+            first_line = final_report.strip().split('\n')[0]
+            title = first_line.replace('#', '').strip()
+        except Exception:
+            pass
+            
+    word_count = len(final_report.split()) if final_report else 0
+
+    # 4. Token Usage & Cost Calculation
+    
+    # Pricing Registry (USD per 1M tokens)
+    # Support for flat rates and tiered rates based on context length (<= 200k vs > 200k).
+    PRICING_REGISTRY = {
+        "gemini-2.5-flash": {
+            "type": "flat",
+            "input": 0.30, 
+            "output": 2.50
+        },
+        "gemini-2.5-pro": {
+            "type": "tiered",
+            "cutoff": 200000,
+            "input": {"standard": 1.25, "long": 2.50},
+            "output": {"standard": 10.00, "long": 15.00}
+        },
+        "gemini-3.0-pro": {
+            "type": "tiered",
+            "cutoff": 200000,
+            "input": {"standard": 2.00, "long": 4.00},
+            "output": {"standard": 12.00, "long": 18.00}
+        },
+        "gemini-3-pro-preview": { # Alias
+            "type": "tiered",
+            "cutoff": 200000,
+            "input": {"standard": 2.00, "long": 4.00},
+            "output": {"standard": 12.00, "long": 18.00}
+        }
+    }
+
+    # Determine Model Name from Config
+    configurable = config.get("configurable", {})
+    # Check keys in order of likelihood for user API input
+    model_name = (
+        configurable.get("model_name") 
+        or configurable.get("model") 
+        or configurable.get("final_report_model") 
+        or "gemini-2.5-flash" # Default fallback
+    )
+    
+    # Determine Webhook URL from Config (API input overrides env var)
+    webhook_url = (
+        configurable.get("webhook_endpoint") 
+        or os.environ.get("WEBHOOK_URL")
+    )
+    
+    # Determine Pricing Config
+    pricing_config = PRICING_REGISTRY.get("gemini-2.5-flash") # Default
+    model_key = model_name.lower()
+    
+    # Simple substring match attempt if exact match fails
+    if model_key not in PRICING_REGISTRY:
+        for key, conf in PRICING_REGISTRY.items():
+            if key in model_key:
+                pricing_config = conf
+    else:
+        pricing_config = PRICING_REGISTRY[model_key]
+
+    total_cost = 0.0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    
+    for msg in messages:
+        usage = None
+        if hasattr(msg, 'response_metadata'):
+            usage = msg.response_metadata.get('usage_metadata') or msg.response_metadata.get('token_usage')
+        elif hasattr(msg, 'additional_kwargs'):
+             usage = msg.additional_kwargs.get('usage_metadata')
+        
+        if usage:
+            inp = usage.get('input_tokens', 0) or usage.get('prompt_tokens', 0)
+            out = usage.get('output_tokens', 0) or usage.get('completion_tokens', 0)
+            
+            total_input_tokens += inp
+            total_output_tokens += out
+            
+            # Calculate cost for this specific turn
+            inp_rate = 0.0
+            out_rate = 0.0
+            
+            if pricing_config["type"] == "flat":
+                inp_rate = pricing_config["input"]
+                out_rate = pricing_config["output"]
+            elif pricing_config["type"] == "tiered":
+                cutoff = pricing_config["cutoff"]
+                if inp <= cutoff:
+                    inp_rate = pricing_config["input"]["standard"]
+                    out_rate = pricing_config["output"]["standard"]
+                else:
+                    inp_rate = pricing_config["input"]["long"]
+                    out_rate = pricing_config["output"]["long"]
+            
+            turn_cost = (inp / 1_000_000 * inp_rate) + (out / 1_000_000 * out_rate)
+            total_cost += turn_cost
+            
+    # Add cumulative tokens tracked in state
+    state_input = state.get("total_input_tokens", 0)
+    state_output = state.get("total_output_tokens", 0)
+    
+    # Calculate cost for accumulated tokens (using same pricing config as model, simple approximation)
+    # Ideally should track model per usage but simplified for now
+    if pricing_config["type"] == "flat":
+        state_cost = (state_input / 1_000_000 * pricing_config["input"]) + (state_output / 1_000_000 * pricing_config["output"])
+    else: # Tiered
+        # Simplified tiered calculation (assuming all standard for accumulated to avoid complexity)
+        state_cost = (state_input / 1_000_000 * pricing_config["input"]["standard"]) + (state_output / 1_000_000 * pricing_config["output"]["standard"])
+
+    total_cost += state_cost
+    total_input_tokens += state_input
+    total_output_tokens += state_output
+
+    # Debug token usage
+    print(f"DEBUG: Model: {model_name}. Tokens: {total_input_tokens}/{total_output_tokens}. Total Cost: ${total_cost:.6f}")
+
+    if not webhook_url:
+        return {"messages": [AIMessage(content="WEBHOOK_URL not configured. Report not sent.")]}
+
+    # Construct Enhanced Flat Payload
+    payload = {
+        "research_result": final_report,
+        "title": title,
+        "original_prompt": original_prompt,
+        "run_id": run_id,
+        "task_id": run_id, # Alias for compatibility
+        "thread_id": thread_id,
+        "status": "success",
+        "timestamp": get_today_str(),
+        "report_format": "markdown",
+        "word_count": word_count,
+        "cost_in_usd": round(total_cost, 6),
+        "model_name": model_name
+    }
+    
+    print(f"DEBUG: notifier_node started. WEBHOOK_URL={webhook_url}")
+    print(f"DEBUG: Payload keys: {list(payload.keys())}")
+    print(f"DEBUG: Payload content sample: {str(payload)[:500]}...")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(webhook_url, json=payload, timeout=30) as response:
+                if response.status >= 200 and response.status < 300:
+                    print(f"DEBUG: Webhook success. Status: {response.status}")
+                    return {"messages": [AIMessage(content=f"Report successfully sent to webhook: {webhook_url}")]}
+                else:
+                    response_text = await response.text()
+                    print(f"DEBUG: Webhook failed. Status: {response.status}. Response: {response_text}")
+                    return {"messages": [AIMessage(content=f"Failed to send report to webhook. Status: {response.status}")]}
+    except Exception as e:
+        return {"messages": [AIMessage(content=f"Error sending report to webhook: {e}")]}
+
 # Main Deep Researcher Graph Construction
 # Creates the complete deep research workflow from user input to final report
 deep_researcher_builder = StateGraph(
@@ -709,11 +1004,13 @@ deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)        
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
+deep_researcher_builder.add_node("notifier_node", notifier_node)                      # Webhook delivery phase
 
 # Define main workflow edges for sequential execution
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
-deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
+deep_researcher_builder.add_edge("final_report_generation", "notifier_node")       # Report to webhook
+deep_researcher_builder.add_edge("notifier_node", END)                             # Final exit point
 
 # Compile the complete deep researcher workflow
 deep_researcher = deep_researcher_builder.compile()

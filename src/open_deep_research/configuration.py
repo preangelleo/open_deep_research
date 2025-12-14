@@ -119,7 +119,7 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-mini",
+        default="google_genai:gemini-2.5-flash",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -129,7 +129,7 @@ class Configuration(BaseModel):
         }
     )
     summarization_model_max_tokens: int = Field(
-        default=8192,
+        default=65000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
@@ -151,7 +151,7 @@ class Configuration(BaseModel):
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
+        default="google_genai:gemini-2.5-flash",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -161,7 +161,7 @@ class Configuration(BaseModel):
         }
     )
     research_model_max_tokens: int = Field(
-        default=10000,
+        default=65000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
@@ -171,7 +171,7 @@ class Configuration(BaseModel):
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1",
+        default="google_genai:gemini-2.5-flash",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -181,7 +181,7 @@ class Configuration(BaseModel):
         }
     )
     compression_model_max_tokens: int = Field(
-        default=8192,
+        default=65000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
@@ -191,7 +191,7 @@ class Configuration(BaseModel):
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
+        default="google_genai:gemini-2.5-flash",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
@@ -201,12 +201,32 @@ class Configuration(BaseModel):
         }
     )
     final_report_model_max_tokens: int = Field(
-        default=10000,
+        default=65000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 10000,
                 "description": "Maximum output tokens for final report model"
+            }
+        }
+    )
+    safety_net_model: str = Field(
+        default="google_genai:gemini-2.5-flash-lite",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "google_genai:gemini-2.5-flash-lite",
+                "description": "Model to use as a safety net fallback for all operations"
+            }
+        }
+    )
+    writer_fallback_model: str = Field(
+        default="google_genai:gemini-2.5-pro",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "google_genai:gemini-2.5-pro",
+                "description": "Fallback model for the final report writer"
             }
         }
     )
@@ -244,6 +264,41 @@ class Configuration(BaseModel):
             field_name: os.environ.get(field_name.upper(), configurable.get(field_name))
             for field_name in field_names
         }
+        
+        # Helper to normalize model names (auto-prepend provider)
+        def normalize_model(model_val):
+            if isinstance(model_val, str) and model_val.startswith("gemini"):
+                return f"google_genai:{model_val}"
+            return model_val
+
+        # Apply normalization to model fields
+        model_fields = [
+            "summarization_model", 
+            "research_model", 
+            "compression_model", 
+            # "final_report_model",  <-- REMOVED from normalization list because it is handled hardcoded below
+            # "safety_net_model",    <-- REMOVED
+            # "writer_fallback_model" <-- REMOVED
+        ]
+        
+        for field in model_fields:
+            if field in values and values[field]:
+                values[field] = normalize_model(values[field])
+
+        # --- HARDCODED MODEL ENFORCEMENT ---
+        # The following models are strictly enforced by system policy and CANNOT be overridden by user inputs.
+        # This ensures the "Dual-Track Cascading Fallback Strategy" is strictly adhered to.
+        
+        # 1. Final Report Writer: ALWAYS starts with 3.0 Pro for maximum quality
+        values["final_report_model"] = "google_genai:gemini-3-pro-preview"
+        
+        # 2. Writer Fallback: If 3.0 fails, use 2.5 Pro (high capacity)
+        values["writer_fallback_model"] = "google_genai:gemini-2.5-pro"
+        
+        # 3. Ultimate Safety Net: ALWAYS 2.5 Flash Lite (massive quota)
+        values["safety_net_model"] = "google_genai:gemini-2.5-flash-lite"
+        # -----------------------------------
+                
         return cls(**{k: v for k, v in values.items() if v is not None})
 
     class Config:

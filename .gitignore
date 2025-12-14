@@ -67,3 +67,20 @@ tmp/
 temp/
 
 .langgraph_api
+
+# Sensitive / Credentials
+debug_models.py
+credentials/
+*.pem
+*.key
+mcp_servers.json
+webhook-callback-payload-schema.json
+HOW_TO_USE.md
+trigger_run.py
+prompt.md
+deploy-to-production.sh
+docker-compose.yml
+tests/
+Dockerfile
+src/open_deep_research/token_utils.py
+src/open_deep_research/state.py

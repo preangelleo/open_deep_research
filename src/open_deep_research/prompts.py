@@ -248,9 +248,10 @@ Here are the findings from the research that you conducted:
 Please create a detailed answer to the overall research brief that:
 1. Is well-organized with proper headings (# for title, ## for sections, ### for subsections)
 2. Includes specific facts and insights from the research
-3. References relevant sources using [Title](URL) format
-4. Provides a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
-5. Includes a "Sources" section at the end with all referenced links
+3. Provides a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
+4. **CRITICAL: Do NOT include any technical citations, footnotes, or link references.** (e.g., remove `[1]`, `[Title](URL)`, `(Source: ...)`).
+5. **CRITICAL: Do NOT include a "Sources" / "Bibliography" section at the end.**
+6. **ALLOWED:** You SHOULD mention sources naturally in the text if it adds authority or context (e.g., "According to a 2024 study by Nature...", "As Elon Musk stated...", "Reports from The New York Times indicate..."). Just do not add the technical bracketed citation or URL.
 
 You can structure your report in a number of different ways. Here are some examples:
 
@@ -263,10 +264,9 @@ To answer a question that asks you to compare two things, you might structure yo
 
 To answer a question that asks you to return a list of things, you might only need a single section which is the entire list.
 1/ list of things or table of things
-Or, you could choose to make each item in the list a separate section in the report. When asked for lists, you don't need an introduction or conclusion.
-1/ item 1
-2/ item 2
-3/ item 3
+2/ item 1
+3/ item 2
+4/ item 3
 
 To answer a question that asks you to summarize a topic, give a report, or give an overview, you might structure your report like this:
 1/ overview of topic
@@ -293,18 +293,11 @@ REMEMBER:
 The brief and research may be in English, but you need to translate this information to the right language when writing the final answer.
 Make sure the final answer report is in the SAME language as the human messages in the message history.
 
-Format the report in clear markdown with proper structure and include source references where appropriate.
+Format the report in clear markdown with proper structure.
 
-<Citation Rules>
-- Assign each unique URL a single citation number in your text
-- End with ### Sources that lists each source with corresponding numbers
-- IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
-- Each source should be a separate line item in a list, so that in markdown it is rendered as a list.
-- Example format:
-  [1] Source Title: URL
-  [2] Source Title: URL
-- Citations are extremely important. Make sure to include these, and pay a lot of attention to getting these right. Users will often use these citations to look into more information.
-</Citation Rules>
+**SUMMARY OF CITATION STYLE:**
+- **YES**: Natural language attribution ("According to NASA...", "The WHO reports...")
+- **NO**: Brackets `[1]`, Links `[NASA](http...)`, Footnotes, Bibliography sections.
 """
 
 
